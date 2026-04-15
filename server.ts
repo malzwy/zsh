@@ -25,43 +25,57 @@ async function startServer() {
     if (texts.length === 0) return [];
     
     const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
-Return ONLY a valid JSON array of strings in the exact same order, with the exact same number of elements. 
-Do not include any markdown formatting like \`\`\`json. Just the raw JSON array.
+Return ONLY a valid JSON array of strings. 
+No explanations, no markdown, no <think> tags. 
+Just the raw JSON array [ "string1", "string2", ... ].
 
 Strings to translate:
 ${JSON.stringify(texts)}`;
 
     let resultText = "";
-    if (providerId === 'gemini') {
-      const ai = new GoogleGenAI({ apiKey: apiKey });
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: { responseMimeType: 'application/json' }
-      });
-      resultText = response.text?.trim() || "[]";
-    } else {
-      const openai = new OpenAI({ 
-        apiKey: apiKey || 'dummy-key', 
-        baseURL: providerConfig.baseURL || undefined
-      });
-      const response = await openai.chat.completions.create({
-        model: model,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      resultText = response.choices[0]?.message?.content?.trim() || "[]";
-    }
+    try {
+      if (providerId === 'gemini') {
+        const ai = new GoogleGenAI({ apiKey: apiKey });
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: { responseMimeType: 'application/json' }
+        });
+        resultText = response.text?.trim() || "[]";
+      } else {
+        const openai = new OpenAI({ 
+          apiKey: apiKey || 'dummy-key', 
+          baseURL: providerConfig.baseURL || undefined
+        });
+        const response = await openai.chat.completions.create({
+          model: model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+        });
+        resultText = response.choices[0]?.message?.content?.trim() || "[]";
+      }
 
-    resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    resultText = resultText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-    const match = resultText.match(/\[\s*[\s\S]*\s*\]/);
-    if (match) resultText = match[0];
+      // Robust Parsing
+      resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      
+      const startArr = resultText.indexOf('[');
+      const endArr = resultText.lastIndexOf(']');
+      if (startArr !== -1 && endArr !== -1 && endArr > startArr) {
+        resultText = resultText.substring(startArr, endArr + 1);
+      }
 
-    const translated = JSON.parse(resultText);
-    if (!Array.isArray(translated) || translated.length !== texts.length) {
-      throw new Error("Translation format error");
+      // Fix common small model JSON errors
+      resultText = resultText.replace(/,\s*\]/g, ']'); // Trailing comma
+
+      const translated = JSON.parse(resultText);
+      if (Array.isArray(translated) && translated.length === texts.length) {
+        return translated;
+      }
+      return texts;
+    } catch (e) {
+      console.error("Translation/Parsing Error:", e, "Raw:", resultText);
+      return texts; // Fallback
     }
-    return translated;
   }
 
   // API route to get configuration
@@ -82,7 +96,19 @@ ${JSON.stringify(texts)}`;
       const file = req.file;
       let { target_lang, provider_id, model_id, api_key } = req.body;
 
-      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      // Debug logging for incoming request
+      console.log(`[Dify Request] Headers:`, JSON.stringify(req.headers));
+      console.log(`[Dify Request] Body Keys:`, Object.keys(req.body));
+      
+      if (!file) {
+        console.error("[Dify Error] No file object in request");
+        return res.status(400).json({ error: "No file uploaded. Please check if the 'file' parameter type is set to 'File' in Dify." });
+      }
+
+      if (file.size < 100) {
+        console.error(`[Dify Error] File received but too small (${file.size} bytes). Dify sent a placeholder instead of binary.`);
+        return res.status(400).json({ error: `File content missing. Received only ${file.size} bytes. Ensure Dify HTTP node is sending the actual file binary.` });
+      }
       
       const configPath = path.join(__dirname, 'config.json');
       const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
@@ -118,7 +144,8 @@ ${JSON.stringify(texts)}`;
         formatConfig.xmlPaths.some(regex => regex.test(name))
       );
 
-      // Process files
+      // Process files with concurrency
+      const CONCURRENCY_LIMIT = 3;
       for (const xmlPath of xmlFiles) {
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
@@ -126,29 +153,35 @@ ${JSON.stringify(texts)}`;
         const doc = new DOMParser().parseFromString(content, 'application/xml');
         const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
         
-        // Dify Optimization: Use larger batches (50) to stay within 60s timeout
         const BATCH_SIZE = 50;
+        const batches = [];
         for (let i = 0; i < tNodes.length; i += BATCH_SIZE) {
-          const batch = tNodes.slice(i, i + BATCH_SIZE);
-          const texts = batch.map(n => n.textContent || "").filter(t => t.trim().length > 0);
-          
-          if (texts.length > 0) {
-            const translated = await internalTranslate(
-              texts, 
-              target_lang || 'Chinese', 
-              finalApiKey, 
-              provider_id || 'gemini', 
-              providerConfig, 
-              finalModel
-            );
+          batches.push(tNodes.slice(i, i + BATCH_SIZE));
+        }
 
-            let translatedIdx = 0;
-            batch.forEach((node) => {
-              if ((node.textContent || "").trim().length > 0) {
-                node.textContent = translated[translatedIdx++];
-              }
-            });
-          }
+        // Process batches in parallel chunks
+        for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
+          const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
+          await Promise.all(currentChunks.map(async (batch) => {
+            const texts = batch.map(n => n.textContent || "").filter(t => t.trim().length > 0);
+            if (texts.length > 0) {
+              const translated = await internalTranslate(
+                texts, 
+                target_lang || 'Chinese', 
+                finalApiKey, 
+                provider_id, 
+                providerConfig, 
+                finalModel
+              );
+
+              let translatedIdx = 0;
+              batch.forEach((node) => {
+                if ((node.textContent || "").trim().length > 0) {
+                  node.textContent = translated[translatedIdx++];
+                }
+              });
+            }
+          }));
         }
 
         const serializer = new XMLSerializer();
@@ -264,9 +297,10 @@ ${JSON.stringify(texts)}`;
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  server.timeout = 600000; // 10 minutes timeout for long document translations
 }
 
 startServer();
