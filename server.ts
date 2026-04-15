@@ -76,7 +76,7 @@ ${JSON.stringify(texts)}`;
     }
   });
 
-  // Dify-compatible Document Translation API
+  // Dify-compatible Document Translation API (Optimized for Sync Response)
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
     try {
       const file = req.file;
@@ -84,7 +84,6 @@ ${JSON.stringify(texts)}`;
 
       if (!file) return res.status(400).json({ error: "No file uploaded" });
       
-      // Load config to get provider details
       const configPath = path.join(__dirname, 'config.json');
       const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
       const providerConfig = config.providers[provider_id || 'gemini'];
@@ -109,6 +108,7 @@ ${JSON.stringify(texts)}`;
         formatConfig.xmlPaths.some(regex => regex.test(name))
       );
 
+      // Process files
       for (const xmlPath of xmlFiles) {
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
@@ -116,23 +116,29 @@ ${JSON.stringify(texts)}`;
         const doc = new DOMParser().parseFromString(content, 'application/xml');
         const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
         
-        const BATCH_SIZE = 20;
+        // Dify Optimization: Use larger batches (50) to stay within 60s timeout
+        const BATCH_SIZE = 50;
         for (let i = 0; i < tNodes.length; i += BATCH_SIZE) {
           const batch = tNodes.slice(i, i + BATCH_SIZE);
-          const texts = batch.map(n => n.textContent || "");
+          const texts = batch.map(n => n.textContent || "").filter(t => t.trim().length > 0);
           
-          const translated = await internalTranslate(
-            texts, 
-            target_lang || 'Chinese', 
-            finalApiKey, 
-            provider_id || 'gemini', 
-            providerConfig, 
-            finalModel
-          );
+          if (texts.length > 0) {
+            const translated = await internalTranslate(
+              texts, 
+              target_lang || 'Chinese', 
+              finalApiKey, 
+              provider_id || 'gemini', 
+              providerConfig, 
+              finalModel
+            );
 
-          batch.forEach((node, idx) => {
-            node.textContent = translated[idx];
-          });
+            let translatedIdx = 0;
+            batch.forEach((node) => {
+              if ((node.textContent || "").trim().length > 0) {
+                node.textContent = translated[translatedIdx++];
+              }
+            });
+          }
         }
 
         const serializer = new XMLSerializer();
@@ -141,26 +147,11 @@ ${JSON.stringify(texts)}`;
 
       const outputBuffer = await zip.generateAsync({ type: 'nodebuffer' });
       
-      // Save to temp file for Dify download
-      const fileId = Math.random().toString(36).substring(7);
-      const outputsDir = path.join(__dirname, 'dist', 'outputs');
-      await fs.mkdir(outputsDir, { recursive: true });
-      
-      const fileName = `translated_${fileId}_${file.originalname}`;
-      const filePath = path.join(outputsDir, fileName);
-      await fs.writeFile(filePath, outputBuffer);
-
-      // Return JSON instead of binary for Dify compatibility
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.get('host');
-      const downloadUrl = `${protocol}://${host}/api/v1/download/${fileName}`;
-
-      res.json({
-        status: "success",
-        file_name: fileName,
-        download_url: downloadUrl,
-        message: "Translation complete. Use the download_url to get the file."
-      });
+      // Set headers for direct file download in Dify
+      const outputFileName = `translated_${file.originalname}`;
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(outputFileName)}"`);
+      res.send(outputBuffer);
 
     } catch (error: any) {
       console.error("Dify API Error:", error);
