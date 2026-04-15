@@ -148,9 +148,13 @@ ${JSON.stringify(texts)}`;
       const outputBuffer = await zip.generateAsync({ type: 'nodebuffer' });
       
       // Set headers for direct file download in Dify
-      const outputFileName = `translated_${file.originalname}`;
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(outputFileName)}"`);
+      const ext = path.extname(file.originalname);
+      const baseName = path.basename(file.originalname, ext);
+      const langSuffix = target_lang || 'Chinese';
+      const outputFileName = `${baseName}_${langSuffix}${ext}`;
+
+      res.setHeader('Content-Type', file.mimetype || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${outputFileName}"; filename*=UTF-8''${encodeURIComponent(outputFileName)}`);
       res.send(outputBuffer);
 
     } catch (error: any) {

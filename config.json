@@ -40,9 +40,13 @@
     "ollama": {
       "name": "Local Ollama",
       "models": [
-        { "id": "deepseek-r1:8b", "name": "DeepSeek R1 (8B)" },
-        { "id": "llama3", "name": "Llama 3" },
-        { "id": "qwen2", "name": "Qwen 2" }
+        { "id": "deepseek-r1:8b", "name": "DeepSeek R1 8B" },
+        { "id": "deepseek-r1:1.5b", "name": "DeepSeek R1 1.5B" },
+        { "id": "qwen3.5:35b", "name": "Qwen 3.5 35B" },
+        { "id": "qwen3.5:9b", "name": "Qwen 3.5 9B" },
+        { "id": "qwen3.5:0.8b", "name": "Qwen 3.5 0.8B" },
+        { "id": "gemma4:26b", "name": "Gemma 4 26B" },
+        { "id": "deepseek-ocr:3b", "name": "DeepSeek OCR 3B" }
       ],
       "defaultKey": "ollama",
       "baseURL": "http://localhost:11434/v1"

@@ -14,8 +14,11 @@ if [ -f "config.json" ]; then
 fi
 
 # 2. 获取最新代码
-# 如果您是使用 Git 部署的，取消下面行的注释:
-# git pull
+echo -e "${GREEN}正在从 GitHub 拉取最新代码...${NC}"
+# 解决 GnuTLS recv error (-110) 的常见配置
+git config --local http.version HTTP/1.1
+git config --local http.postBuffer 524288000
+git pull
 
 # 3. 安装依赖
 echo -e "${GREEN}正在安装/更新依赖...${NC}"
