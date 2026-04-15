@@ -1,0 +1,51 @@
+{
+  "providers": {
+    "gemini": {
+      "name": "Google Gemini",
+      "models": [
+        { "id": "gemini-flash-latest", "name": "Gemini Flash" },
+        { "id": "gemini-3.1-pro-preview", "name": "Gemini Pro" }
+      ],
+      "defaultKey": "",
+      "baseURL": ""
+    },
+    "openai": {
+      "name": "OpenAI",
+      "models": [
+        { "id": "gpt-4o-mini", "name": "GPT-4o Mini" },
+        { "id": "gpt-4o", "name": "GPT-4o" }
+      ],
+      "defaultKey": "",
+      "baseURL": ""
+    },
+    "zhipu": {
+      "name": "Zhipu AI (GLM)",
+      "models": [
+        { "id": "glm-4.7-flash", "name": "GLM-4.7 Flash" },
+        { "id": "glm-4-flash", "name": "GLM-4 Flash" },
+        { "id": "glm-4", "name": "GLM-4" }
+      ],
+      "defaultKey": "ac97a209b660418c96194f19dea899bf.qClhuEVfBW00RMf7",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4"
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "models": [
+        { "id": "deepseek-chat", "name": "DeepSeek Chat (V3)" },
+        { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner (R1)" }
+      ],
+      "defaultKey": "",
+      "baseURL": "https://api.deepseek.com/v1"
+    },
+    "ollama": {
+      "name": "Local Ollama",
+      "models": [
+        { "id": "deepseek-r1:8b", "name": "DeepSeek R1 (8B)" },
+        { "id": "llama3", "name": "Llama 3" },
+        { "id": "qwen2", "name": "Qwen 2" }
+      ],
+      "defaultKey": "ollama",
+      "baseURL": "http://localhost:11434/v1"
+    }
+  }
+}
