@@ -95,6 +95,11 @@ ${JSON.stringify(sanitizedTexts)}`;
     }
   });
 
+  // Health Check
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
+  });
+
   // Dify-compatible Document Translation API (Optimized for Sync Response)
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
     try {
@@ -139,8 +144,25 @@ ${JSON.stringify(sanitizedTexts)}`;
         textTag: 'w:t'
       };
 
-      if (extension === '.xlsx') {
-        formatConfig = { xmlPaths: [/xl\/worksheets\/sheet\d+\.xml/], textTag: 't' };
+      if (extension === '.docx') {
+        formatConfig = { 
+          xmlPaths: [
+            /word\/document\.xml/,
+            /word\/header\d+\.xml/,
+            /word\/footer\d+\.xml/,
+            /word\/footnotes\.xml/,
+            /word\/endnotes\.xml/
+          ], 
+          textTag: 'w:t' 
+        };
+      } else if (extension === '.xlsx') {
+        formatConfig = { 
+          xmlPaths: [
+            /xl\/worksheets\/sheet\d+\.xml/,
+            /xl\/sharedStrings\.xml/
+          ], 
+          textTag: 't' 
+        };
       } else if (extension === '.pptx') {
         formatConfig = { 
           xmlPaths: [
@@ -203,7 +225,11 @@ ${JSON.stringify(sanitizedTexts)}`;
         zip.file(xmlPath, serializer.serializeToString(doc));
       }
 
-      const outputBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+      const outputBuffer = await zip.generateAsync({ 
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      });
       
       // Set headers for direct file download in Dify
       const ext = path.extname(file.originalname);
@@ -243,56 +269,21 @@ ${JSON.stringify(sanitizedTexts)}`;
         return res.json({ translatedTexts: [] });
       }
 
-      const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
-Return ONLY a valid JSON array of strings in the exact same order, with the exact same number of elements. 
-Do not include any markdown formatting like \`\`\`json. Just the raw JSON array.
-
-Strings to translate:
-${JSON.stringify(texts)}`;
-
-      let resultText = "";
-
-      if (providerId === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: apiKey });
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: prompt,
-          config: { responseMimeType: 'application/json' }
-        });
-        resultText = response.text?.trim() || "[]";
-      } else {
-        const openai = new OpenAI({ 
-          apiKey: apiKey || 'dummy-key', 
-          baseURL: providerConfig.baseURL || undefined
-        });
-        const response = await openai.chat.completions.create({
-          model: model,
-          messages: [{ role: 'user', content: prompt }],
-        });
-        resultText = response.choices[0]?.message?.content?.trim() || "[]";
-      }
-
-      // Robust JSON extraction (handles <think> tags and markdown)
-      resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-      resultText = resultText.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-      const match = resultText.match(/\[\s*[\s\S]*\s*\]/);
-      if (match) {
-        resultText = match[0];
-      }
-
-      const translatedTexts = JSON.parse(resultText);
-      
-      if (!Array.isArray(translatedTexts) || translatedTexts.length !== texts.length) {
-        throw new Error("Invalid response format or length mismatch");
-      }
+      const translatedTexts = await internalTranslate(
+        texts, 
+        targetLanguage, 
+        apiKey, 
+        providerId, 
+        providerConfig, 
+        model
+      );
 
       res.json({ translatedTexts });
     } catch (error: any) {
       console.error("Backend Translation error:", error);
       res.status(500).json({ 
         error: error.message, 
-        status: error.status || 500,
-        details: error.response?.data || error
+        status: error.status || 500
       });
     }
   });

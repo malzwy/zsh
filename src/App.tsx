@@ -189,116 +189,148 @@ export default function App() {
     }
   };
 
+  const [processingMode, setProcessingMode] = useState<'server' | 'client'>('server');
+
   const handleTranslate = async () => {
     if (!file) return;
 
     setIsTranslating(true);
     setProgress(0);
-    setStatus('Translating document...');
+    setStatus('Preparing document...');
     setError(null);
     setTranslatedFileUrl(null);
 
     try {
-      const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-      const format = FORMATS.find(f => f.extensions.includes(ext));
-      
-      if (!format) {
-        throw new Error("Unsupported file format.");
-      }
+      if (processingMode === 'server') {
+        setStatus('Uploading and translating on server (this may take a few minutes)...');
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('target_lang', targetLanguage);
+        formData.append('provider_id', provider);
+        formData.append('model_id', model);
+        formData.append('api_key', apiKey);
 
-      const zip = await JSZip.loadAsync(file);
-      const xmlFilesToProcess: JSZip.JSZipObject[] = [];
-      
-      zip.forEach((relativePath, zipEntry) => {
-        if (format.xmlPaths(relativePath)) {
-          xmlFilesToProcess.push(zipEntry);
-        }
-      });
-
-      let totalParagraphs = 0;
-      let processedParagraphs = 0;
-
-      const fileData: { file: JSZip.JSZipObject, doc: Document, paragraphs: Element[] }[] = [];
-      const parser = new DOMParser();
-      
-      for (const xmlFile of xmlFilesToProcess) {
-        const xmlString = await xmlFile.async("string");
-        const doc = parser.parseFromString(xmlString, "application/xml");
-        const paragraphs = Array.from(doc.getElementsByTagName(format.paragraphTag));
-        
-        const textParagraphs = paragraphs.filter(p => {
-          const texts = Array.from(p.getElementsByTagName(format.textTag));
-          return texts.some(t => t.textContent?.trim());
+        const response = await fetch('/api/v1/translate-doc', {
+          method: 'POST',
+          body: formData,
         });
 
-        if (textParagraphs.length > 0) {
-          fileData.push({ file: xmlFile, doc, paragraphs: textParagraphs });
-          totalParagraphs += textParagraphs.length;
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.error || 'Server-side translation failed');
         }
-      }
 
-      if (totalParagraphs === 0) {
-        throw new Error("No translatable text found in the document.");
-      }
-
-      const BATCH_SIZE = batchSize > 0 ? batchSize : 50;
-      
-      for (const data of fileData) {
-        const { file: xmlFile, doc, paragraphs } = data;
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
         
-        const batches = [];
-        for (let i = 0; i < paragraphs.length; i += BATCH_SIZE) {
-          batches.push(paragraphs.slice(i, i + BATCH_SIZE));
+        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+        const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+        setTranslatedFileUrl(url);
+        setTranslatedFileName(`${baseName}_${targetLanguage}${ext}`);
+        setProgress(100);
+      } else {
+        // Client-side logic (existing)
+        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+        const format = FORMATS.find(f => f.extensions.includes(ext));
+        
+        if (!format) {
+          throw new Error("Unsupported file format.");
         }
 
-        for (let i = 0; i < batches.length; i += concurrency) {
-          const chunk = batches.slice(i, i + concurrency);
+        const zip = await JSZip.loadAsync(file);
+        const xmlFilesToProcess: JSZip.JSZipObject[] = [];
+        
+        zip.forEach((relativePath, zipEntry) => {
+          if (format.xmlPaths(relativePath)) {
+            xmlFilesToProcess.push(zipEntry);
+          }
+        });
+
+        let totalParagraphs = 0;
+        let processedParagraphs = 0;
+
+        const fileData: { file: JSZip.JSZipObject, doc: Document, paragraphs: Element[] }[] = [];
+        const parser = new DOMParser();
+        
+        for (const xmlFile of xmlFilesToProcess) {
+          const xmlString = await xmlFile.async("string");
+          const doc = parser.parseFromString(xmlString, "application/xml");
+          const paragraphs = Array.from(doc.getElementsByTagName(format.paragraphTag));
           
-          await Promise.all(chunk.map(async (batch) => {
-            const textsToTranslate = batch.map(p => {
-              const tNodes = Array.from(p.getElementsByTagName(format.textTag));
-              return tNodes.map((t: any) => t.textContent || "").join("");
-            });
+          const textParagraphs = paragraphs.filter(p => {
+            const texts = Array.from(p.getElementsByTagName(format.textTag));
+            return texts.some(t => t.textContent?.trim());
+          });
 
-            const translatedTexts = await translateTexts(
-              textsToTranslate, 
-              targetLanguage, 
-              apiKey, 
-              provider, 
-              providersConfig![provider],
-              model, 
-              delaySeconds * 1000,
-              setStatus
-            );
-
-            batch.forEach((p, index) => {
-              const translatedText = translatedTexts[index];
-              const tNodes = Array.from(p.getElementsByTagName(format.textTag));
-              
-              if (tNodes.length > 0) {
-                (tNodes[0] as any).textContent = translatedText;
-                for (let j = 1; j < tNodes.length; j++) {
-                  (tNodes[j] as any).textContent = "";
-                }
-              }
-            });
-          }));
-
-          processedParagraphs += chunk.reduce((acc, b) => acc + b.length, 0);
-          setProgress(Math.round((processedParagraphs / totalParagraphs) * 100));
+          if (textParagraphs.length > 0) {
+            fileData.push({ file: xmlFile, doc, paragraphs: textParagraphs });
+            totalParagraphs += textParagraphs.length;
+          }
         }
 
-        const serializer = new XMLSerializer();
-        const newXmlString = serializer.serializeToString(doc);
-        zip.file(xmlFile.name, newXmlString);
-      }
+        if (totalParagraphs === 0) {
+          throw new Error("No translatable text found in the document.");
+        }
 
-      const newBlob = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(newBlob);
-      
-      setTranslatedFileUrl(url);
-      setTranslatedFileName(`translated_${file.name}`);
-      setProgress(100);
+        const BATCH_SIZE = batchSize > 0 ? batchSize : 50;
+        
+        for (const data of fileData) {
+          const { file: xmlFile, doc, paragraphs } = data;
+          
+          const batches = [];
+          for (let i = 0; i < paragraphs.length; i += BATCH_SIZE) {
+            batches.push(paragraphs.slice(i, i + BATCH_SIZE));
+          }
+
+          for (let i = 0; i < batches.length; i += concurrency) {
+            const chunk = batches.slice(i, i + concurrency);
+            
+            await Promise.all(chunk.map(async (batch) => {
+              const textsToTranslate = batch.map(p => {
+                const tNodes = Array.from(p.getElementsByTagName(format.textTag));
+                return tNodes.map((t: any) => t.textContent || "").join("");
+              });
+
+              const translatedTexts = await translateTexts(
+                textsToTranslate, 
+                targetLanguage, 
+                apiKey, 
+                provider, 
+                providersConfig![provider],
+                model, 
+                delaySeconds * 1000,
+                setStatus
+              );
+
+              batch.forEach((p, index) => {
+                const translatedText = translatedTexts[index];
+                const tNodes = Array.from(p.getElementsByTagName(format.textTag));
+                
+                if (tNodes.length > 0) {
+                  (tNodes[0] as any).textContent = translatedText;
+                  for (let j = 1; j < tNodes.length; j++) {
+                    (tNodes[j] as any).textContent = "";
+                  }
+                }
+              });
+            }));
+
+            processedParagraphs += chunk.reduce((acc, b) => acc + b.length, 0);
+            setProgress(Math.round((processedParagraphs / totalParagraphs) * 100));
+          }
+
+          const serializer = new XMLSerializer();
+          const newXmlString = serializer.serializeToString(doc);
+          zip.file(xmlFile.name, newXmlString);
+        }
+
+        const newBlob = await zip.generateAsync({ type: "blob" });
+        const url = URL.createObjectURL(newBlob);
+        
+        setTranslatedFileUrl(url);
+        setTranslatedFileName(`translated_${file.name}`);
+        setProgress(100);
+      }
     } catch (err: any) {
       console.error(err);
       setError(err.message || "An error occurred during translation.");
@@ -376,6 +408,18 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium text-slate-700">Processing Mode</Label>
+                    <Select value={processingMode} onValueChange={(val: any) => setProcessingMode(val)}>
+                      <SelectTrigger className="bg-white">
+                        <SelectValue placeholder="Select mode" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="server">Server-side (Fast & Stable)</SelectItem>
+                        <SelectItem value="client">Client-side (Progressive)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <div className="space-y-2">
                     <Label className="text-sm font-medium text-slate-700">Provider</Label>
                     <Select value={provider} onValueChange={(val) => { setProvider(val); setModel(providersConfig[val].models[0].id); }}>
