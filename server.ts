@@ -80,15 +80,25 @@ ${JSON.stringify(texts)}`;
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
     try {
       const file = req.file;
-      const { target_lang, provider_id, model_id, api_key } = req.body;
+      let { target_lang, provider_id, model_id, api_key } = req.body;
 
       if (!file) return res.status(400).json({ error: "No file uploaded" });
       
       const configPath = path.join(__dirname, 'config.json');
       const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
-      const providerConfig = config.providers[provider_id || 'gemini'];
+      
+      // Smart Provider Selection: If not provided, find the first one with a key
+      if (!provider_id) {
+        const availableProviders = Object.keys(config.providers).filter(p => config.providers[p].defaultKey);
+        provider_id = availableProviders.includes('zhipu') ? 'zhipu' : (availableProviders[0] || 'gemini');
+        console.log(`[Dify] No provider_id sent, auto-selected: ${provider_id}`);
+      }
+
+      const providerConfig = config.providers[provider_id];
       const finalApiKey = api_key || providerConfig.defaultKey;
       const finalModel = model_id || providerConfig.models[0].id;
+
+      console.log(`[Dify] Translating ${file.originalname} to ${target_lang || 'Chinese'} using ${provider_id}/${finalModel}`);
 
       const zip = await JSZip.loadAsync(file.buffer);
       const extension = path.extname(file.originalname).toLowerCase();
