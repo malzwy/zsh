@@ -24,58 +24,63 @@ async function startServer() {
   async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string) {
     if (texts.length === 0) return [];
     
-    const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
-Return ONLY a valid JSON array of strings. 
-No explanations, no markdown, no <think> tags. 
-Just the raw JSON array [ "string1", "string2", ... ].
+    // Sanitize inputs for small models: remove newlines/quotes that break JSON
+    const sanitizedTexts = texts.map(t => t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim());
 
-Strings to translate:
-${JSON.stringify(texts)}`;
+    const prompt = `Translate this JSON array to ${targetLanguage}. 
+Return ONLY the translated JSON array. 
+Format: ["text1", "text2"]
+
+JSON to translate:
+${JSON.stringify(sanitizedTexts)}`;
 
     let resultText = "";
-    try {
-      if (providerId === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: apiKey });
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: prompt,
-          config: { responseMimeType: 'application/json' }
-        });
-        resultText = response.text?.trim() || "[]";
-      } else {
-        const openai = new OpenAI({ 
-          apiKey: apiKey || 'dummy-key', 
-          baseURL: providerConfig.baseURL || undefined
-        });
-        const response = await openai.chat.completions.create({
-          model: model,
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.1,
-        });
-        resultText = response.choices[0]?.message?.content?.trim() || "[]";
-      }
+    let retries = 2;
+    
+    while (retries >= 0) {
+      try {
+        if (providerId === 'gemini') {
+          const ai = new GoogleGenAI({ apiKey: apiKey });
+          const response = await ai.models.generateContent({
+            model: model,
+            contents: prompt,
+            config: { responseMimeType: 'application/json' }
+          });
+          resultText = response.text?.trim() || "[]";
+        } else {
+          const openai = new OpenAI({ 
+            apiKey: apiKey || 'dummy-key', 
+            baseURL: providerConfig.baseURL || undefined
+          });
+          const response = await openai.chat.completions.create({
+            model: model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.05, // Near deterministic
+          });
+          resultText = response.choices[0]?.message?.content?.trim() || "[]";
+        }
 
-      // Robust Parsing
-      resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-      
-      const startArr = resultText.indexOf('[');
-      const endArr = resultText.lastIndexOf(']');
-      if (startArr !== -1 && endArr !== -1 && endArr > startArr) {
-        resultText = resultText.substring(startArr, endArr + 1);
-      }
+        // Robust Parsing
+        resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        const startArr = resultText.indexOf('[');
+        const endArr = resultText.lastIndexOf(']');
+        if (startArr !== -1 && endArr !== -1 && endArr > startArr) {
+          resultText = resultText.substring(startArr, endArr + 1);
+        }
+        resultText = resultText.replace(/,\s*\]/g, ']'); 
 
-      // Fix common small model JSON errors
-      resultText = resultText.replace(/,\s*\]/g, ']'); // Trailing comma
-
-      const translated = JSON.parse(resultText);
-      if (Array.isArray(translated) && translated.length === texts.length) {
-        return translated;
+        const translated = JSON.parse(resultText);
+        if (Array.isArray(translated) && translated.length === sanitizedTexts.length) {
+          return translated;
+        }
+        throw new Error("Length mismatch");
+      } catch (e) {
+        console.warn(`[Translate] Retry ${2-retries} failed for ${model}:`, e.message);
+        retries--;
+        if (retries < 0) return texts; // Final fallback
       }
-      return texts;
-    } catch (e) {
-      console.error("Translation/Parsing Error:", e, "Raw:", resultText);
-      return texts; // Fallback
     }
+    return texts;
   }
 
   // API route to get configuration
@@ -137,7 +142,16 @@ ${JSON.stringify(texts)}`;
       if (extension === '.xlsx') {
         formatConfig = { xmlPaths: [/xl\/worksheets\/sheet\d+\.xml/], textTag: 't' };
       } else if (extension === '.pptx') {
-        formatConfig = { xmlPaths: [/ppt\/slides\/slide\d+\.xml/], textTag: 'a:t' };
+        formatConfig = { 
+          xmlPaths: [
+            /ppt\/slides\/slide\d+\.xml/,
+            /ppt\/notesSlides\/notesSlide\d+\.xml/,
+            /ppt\/slides\/_rels\/slide\d+\.xml\.rels/,
+            /ppt\/theme\/theme\d+\.xml/,
+            /ppt\/diagrams\/.+\.xml/
+          ], 
+          textTag: 'a:t' 
+        };
       }
 
       const xmlFiles = Object.keys(zip.files).filter(name => 
@@ -145,7 +159,7 @@ ${JSON.stringify(texts)}`;
       );
 
       // Process files with concurrency
-      const CONCURRENCY_LIMIT = 3;
+      const CONCURRENCY_LIMIT = 2; // Lower concurrency for stability on small models
       for (const xmlPath of xmlFiles) {
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
@@ -153,13 +167,13 @@ ${JSON.stringify(texts)}`;
         const doc = new DOMParser().parseFromString(content, 'application/xml');
         const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
         
-        const BATCH_SIZE = 50;
+        // CRITICAL: Small batch size (10-15) for 1.5b models to prevent JSON errors
+        const BATCH_SIZE = 15; 
         const batches = [];
         for (let i = 0; i < tNodes.length; i += BATCH_SIZE) {
           batches.push(tNodes.slice(i, i + BATCH_SIZE));
         }
 
-        // Process batches in parallel chunks
         for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
           const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
           await Promise.all(currentChunks.map(async (batch) => {
@@ -176,7 +190,8 @@ ${JSON.stringify(texts)}`;
 
               let translatedIdx = 0;
               batch.forEach((node) => {
-                if ((node.textContent || "").trim().length > 0) {
+                const originalText = (node.textContent || "").trim();
+                if (originalText.length > 0 && translated[translatedIdx]) {
                   node.textContent = translated[translatedIdx++];
                 }
               });
