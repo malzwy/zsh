@@ -189,7 +189,7 @@ ${JSON.stringify(sanitizedTexts)}`;
       );
 
       // Process files with concurrency and dynamic batching
-      const CONCURRENCY_LIMIT = 2; // Lower concurrency for stability on small models
+      const CONCURRENCY_LIMIT = 5; // Increased concurrency for faster translation
       const translationCache = new Map<string, string>();
       let totalNodesTranslated = 0;
       let totalNodesSkipped = 0;
@@ -228,8 +228,8 @@ ${JSON.stringify(sanitizedTexts)}`;
         const batches: Element[][] = [];
         let currentBatch: Element[] = [];
         let currentChars = 0;
-        const MAX_CHARS = 1000;
-        const MAX_ITEMS = 15;
+        const MAX_CHARS = 2000;
+        const MAX_ITEMS = 30;
 
         for (const node of nodesToTranslate) {
           const text = (node.textContent || "").trim();
