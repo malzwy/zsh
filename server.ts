@@ -28,6 +28,8 @@ async function startServer() {
     // Sanitize inputs for small models: remove newlines/quotes that break JSON
     const sanitizedTexts = texts.map(t => t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim());
 
+    console.log(`[Translate] Using provider: ${providerId}, model: ${model}, baseURL: ${providerConfig?.baseURL}`);
+
     const prompt = `Translate this JSON array to ${targetLanguage}. 
 Return ONLY the translated JSON array. 
 Format: ["text1", "text2"]
