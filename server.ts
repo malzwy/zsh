@@ -18,7 +18,8 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // Helper for batch translation (internal use)
   async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string, signal?: AbortSignal) {
@@ -106,6 +107,10 @@ ${JSON.stringify(sanitizedTexts)}`;
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
     req.setTimeout(0); // Disable timeout for large files
     res.setTimeout(0);
+    
+    // Send keep-alive headers to prevent load balancers/proxies from dropping the connection
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Keep-Alive', 'timeout=600');
     
     // Create an AbortController to stop processing if client disconnects
     const abortController = new AbortController();
