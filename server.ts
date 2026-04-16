@@ -138,11 +138,15 @@ ${JSON.stringify(sanitizedTexts)}`;
       // Smart Provider Selection: If not provided, find the first one with a key
       if (!provider_id) {
         const availableProviders = Object.keys(config.providers).filter(p => config.providers[p].defaultKey);
-        provider_id = availableProviders.includes('zhipu') ? 'zhipu' : (availableProviders[0] || 'gemini');
+        provider_id = availableProviders.includes('ollama') ? 'ollama' : (availableProviders[0] || 'gemini');
         console.log(`[Dify] No provider_id sent, auto-selected: ${provider_id}`);
       }
 
       const providerConfig = config.providers[provider_id];
+      if (!providerConfig) {
+        throw new Error(`Provider '${provider_id}' not found in configuration.`);
+      }
+      
       const finalApiKey = api_key || providerConfig.defaultKey;
       const finalModel = model_id || providerConfig.models[0].id;
 
