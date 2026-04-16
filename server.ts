@@ -375,7 +375,8 @@ ${JSON.stringify(sanitizedTexts)}`;
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
-  server.timeout = 600000; // 10 minutes timeout for long document translations
+  server.timeout = 0; // Disable Node.js server timeout completely
+  server.keepAliveTimeout = 0; // Disable keep-alive timeout
 }
 
 startServer();
