@@ -22,9 +22,8 @@ async function startServer() {
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // Helper for batch translation (internal use)
-  async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string, signal?: AbortSignal) {
+  async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string) {
     if (texts.length === 0) return [];
-    if (signal?.aborted) throw new Error("Translation aborted by client");
     
     // Sanitize inputs for small models: remove newlines/quotes that break JSON
     const sanitizedTexts = texts.map(t => t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim());
@@ -40,7 +39,6 @@ ${JSON.stringify(sanitizedTexts)}`;
     let retries = 2;
     
     while (retries >= 0) {
-      if (signal?.aborted) throw new Error("Translation aborted by client");
       try {
         if (providerId === 'gemini') {
           const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -59,7 +57,7 @@ ${JSON.stringify(sanitizedTexts)}`;
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.05, // Near deterministic
-          }, { signal }); // Pass signal to OpenAI client
+          });
           resultText = response.choices[0]?.message?.content?.trim() || "[]";
         }
 
@@ -107,13 +105,6 @@ ${JSON.stringify(sanitizedTexts)}`;
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
     req.setTimeout(0); // Disable timeout for large files
     res.setTimeout(0);
-    
-    // Create an AbortController to stop processing if client disconnects
-    const abortController = new AbortController();
-    req.on('close', () => {
-      console.log(`[Dify Request] Client disconnected prematurely. Aborting translation task.`);
-      abortController.abort();
-    });
 
     try {
       const file = req.file;
@@ -274,8 +265,7 @@ ${JSON.stringify(sanitizedTexts)}`;
                 finalApiKey, 
                 provider_id, 
                 providerConfig, 
-                finalModel,
-                abortController.signal
+                finalModel
               );
             }
 
