@@ -151,6 +151,7 @@ ${JSON.stringify(sanitizedTexts)}`;
 
       const zip = await JSZip.loadAsync(file.buffer);
       const extension = path.extname(file.originalname).toLowerCase();
+      console.log(`[Dify] Processing file: ${file.originalname}, Extension: ${extension}`);
       
       let formatConfig = {
         xmlPaths: [/word\/document\.xml/],
@@ -192,6 +193,7 @@ ${JSON.stringify(sanitizedTexts)}`;
       const xmlFiles = Object.keys(zip.files).filter(name => 
         formatConfig.xmlPaths.some(regex => regex.test(name))
       );
+      console.log(`[Dify] Found ${xmlFiles.length} XML files to process:`, xmlFiles);
 
       // Process files with concurrency and dynamic batching
       const CONCURRENCY_LIMIT = 5; // Increased concurrency for faster translation
@@ -232,6 +234,8 @@ ${JSON.stringify(sanitizedTexts)}`;
             totalNodesSkipped++; // No translation needed
           }
         });
+        console.log(`[Dify] XML file ${xmlPath}: Found ${tNodes.length} text nodes, ${nodesToTranslate.length} nodes to translate.`);
+
 
         if (nodesToTranslate.length === 0) {
           const serializer = new XMLSerializer();
