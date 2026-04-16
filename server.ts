@@ -108,10 +108,6 @@ ${JSON.stringify(sanitizedTexts)}`;
     req.setTimeout(0); // Disable timeout for large files
     res.setTimeout(0);
     
-    // Send keep-alive headers to prevent load balancers/proxies from dropping the connection
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('Keep-Alive', 'timeout=600');
-    
     // Create an AbortController to stop processing if client disconnects
     const abortController = new AbortController();
     req.on('close', () => {
