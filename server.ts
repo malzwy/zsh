@@ -128,9 +128,9 @@ ${JSON.stringify(sanitizedTexts)}`;
         return res.status(400).json({ error: "No file uploaded. Please check if the 'file' parameter type is set to 'File' in Dify." });
       }
 
-      if (file.size < 100) {
+      if (file.size < 500) {
         console.error(`[Dify Error] File received but too small (${file.size} bytes). Dify sent a placeholder instead of binary.`);
-        return res.status(400).json({ error: `File content missing. Received only ${file.size} bytes. Ensure Dify HTTP node is sending the actual file binary.` });
+        return res.status(400).json({ error: `File content missing. Received only ${file.size} bytes. Ensure Dify HTTP node is sending the actual file binary. Check the 'file' field type is set to 'File' in Dify form-data settings.` });
       }
       
       const configPath = path.join(__dirname, 'config.json');
@@ -318,7 +318,11 @@ ${JSON.stringify(sanitizedTexts)}`;
 
     } catch (error: any) {
       console.error("Dify API Error:", error);
-      res.status(500).json({ error: error.message });
+      // Return 400 instead of 500 so Dify doesn't retry and shows the actual error message
+      res.status(400).json({ 
+        error: error.message || "Internal server error during document translation",
+        hint: "If you see this in Dify, check if the file was sent correctly."
+      });
     }
   });
 
