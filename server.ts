@@ -30,9 +30,12 @@ async function startServer() {
 
     console.log(`[Translate] Using provider: ${providerId}, model: ${model}, baseURL: ${providerConfig?.baseURL}`);
 
-    const prompt = `Translate this JSON array to ${targetLanguage}. 
-Return ONLY the translated JSON array. 
-Format: ["text1", "text2"]
+    const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
+Requirements:
+1. Return ONLY a valid JSON array of strings.
+2. Maintain the exact same number of elements.
+3. Do not include any explanations, markdown formatting, or extra text.
+4. If a string is already in ${targetLanguage}, keep it as is.
 
 JSON to translate:
 ${JSON.stringify(sanitizedTexts)}`;
@@ -56,18 +59,29 @@ ${JSON.stringify(sanitizedTexts)}`;
         } else {
           const openai = new OpenAI({ 
             apiKey: apiKey || 'dummy-key', 
-            baseURL: providerConfig.baseURL || undefined
+            baseURL: providerConfig.baseURL || undefined,
+            timeout: 60000 // 60s timeout for Ollama
           });
           const response = await openai.chat.completions.create({
             model: model,
             messages: [{ role: 'user', content: prompt }],
-            temperature: 0.05, // Near deterministic
+            temperature: 0.1,
           }, { signal: abortSignal });
           resultText = response.choices[0]?.message?.content?.trim() || "[]";
         }
 
-        // Robust Parsing
+        // Robust Parsing for DeepSeek/Ollama
+        console.log(`[Translate] Raw response (first 100 chars): ${resultText.substring(0, 100)}...`);
+        
+        // Remove <think> blocks
         resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        
+        // Extract JSON from markdown blocks if present
+        const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          resultText = jsonMatch[1].trim();
+        }
+
         const startArr = resultText.indexOf('[');
         const endArr = resultText.lastIndexOf(']');
         if (startArr !== -1 && endArr !== -1 && endArr > startArr) {
@@ -79,13 +93,15 @@ ${JSON.stringify(sanitizedTexts)}`;
         if (Array.isArray(translated) && translated.length === sanitizedTexts.length) {
           return translated;
         }
-        throw new Error("Length mismatch");
+        console.error(`[Translate] Length mismatch or not an array. Expected ${sanitizedTexts.length}, got ${Array.isArray(translated) ? translated.length : 'not an array'}`);
+        throw new Error("Length mismatch or invalid format");
       } catch (e) {
-        console.warn(`[Translate] Retry ${2-retries} failed for ${model}:`, e.message);
+        console.warn(`[Translate] Attempt ${3-retries} failed for ${model}:`, e.message);
+        if (resultText) console.warn(`[Translate] Failed resultText snippet: ${resultText.substring(0, 200)}`);
         retries--;
-        if (retries < 0) return texts; // Final fallback
       }
     }
+    console.error(`[Translate] All retries failed for batch. Returning original text.`);
     return texts;
   }
 
@@ -117,7 +133,7 @@ ${JSON.stringify(sanitizedTexts)}`;
 
       // Debug logging for incoming request
       console.log(`[Dify Request] Headers:`, JSON.stringify(req.headers));
-      console.log(`[Dify Request] Body Keys:`, Object.keys(req.body));
+      console.log(`[Dify Request] Body:`, JSON.stringify({ ...req.body, api_key: req.body.api_key ? '***' : undefined }));
       
       if (!file) {
         console.error("[Dify Error] No file object in request");
@@ -313,7 +329,7 @@ ${JSON.stringify(sanitizedTexts)}`;
         return; // Response is already closed, just exit the function
       }
 
-      console.log(`[Done] Translation complete. Translated: ${totalNodesTranslated}, Skipped/Cached: ${totalNodesSkipped}`);
+      console.log(`[Done] Translation complete. File: ${file.originalname}, Translated: ${totalNodesTranslated}, Skipped/Cached: ${totalNodesSkipped}`);
 
       const outputBuffer = await zip.generateAsync({ 
         type: 'nodebuffer',
