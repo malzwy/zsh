@@ -193,8 +193,16 @@ ${JSON.stringify(sanitizedTexts)}`;
       const translationCache = new Map<string, string>();
       let totalNodesTranslated = 0;
       let totalNodesSkipped = 0;
+      let isClientDisconnected = false;
+
+      // Listen for client disconnect to stop processing
+      req.on('close', () => {
+        console.log(`[Dify] Client disconnected prematurely. Stopping translation for ${file.originalname}`);
+        isClientDisconnected = true;
+      });
 
       for (const xmlPath of xmlFiles) {
+        if (isClientDisconnected) break;
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
 
@@ -248,6 +256,7 @@ ${JSON.stringify(sanitizedTexts)}`;
         console.log(`[Process] ${xmlPath}: ${batches.length} batches to translate. (Skipped ${totalNodesSkipped} cached/unneeded nodes)`);
 
         for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
+          if (isClientDisconnected) break;
           const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
           await Promise.all(currentChunks.map(async (batch) => {
             const texts = batch.map(n => (n.textContent || "").trim());
@@ -288,6 +297,10 @@ ${JSON.stringify(sanitizedTexts)}`;
         const serializer = new XMLSerializer();
         zip.file(xmlPath, serializer.serializeToString(doc));
       }
+      if (isClientDisconnected) {
+        return; // Response is already closed, just exit the function
+      }
+
       console.log(`[Done] Translation complete. Translated: ${totalNodesTranslated}, Skipped/Cached: ${totalNodesSkipped}`);
 
       const outputBuffer = await zip.generateAsync({ 
