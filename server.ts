@@ -22,7 +22,7 @@ async function startServer() {
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // Helper for batch translation (internal use)
-  async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string) {
+  async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string, abortSignal?: AbortSignal) {
     if (texts.length === 0) return [];
     
     // Sanitize inputs for small models: remove newlines/quotes that break JSON
@@ -39,6 +39,9 @@ ${JSON.stringify(sanitizedTexts)}`;
     let retries = 2;
     
     while (retries >= 0) {
+      if (abortSignal?.aborted) {
+         throw new Error("Translation aborted by client");
+      }
       try {
         if (providerId === 'gemini') {
           const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -57,7 +60,7 @@ ${JSON.stringify(sanitizedTexts)}`;
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.05, // Near deterministic
-          });
+          }, { signal: abortSignal });
           resultText = response.choices[0]?.message?.content?.trim() || "[]";
         }
 
@@ -194,11 +197,13 @@ ${JSON.stringify(sanitizedTexts)}`;
       let totalNodesTranslated = 0;
       let totalNodesSkipped = 0;
       let isClientDisconnected = false;
+      const abortController = new AbortController();
 
       // Listen for client disconnect to stop processing
       req.on('close', () => {
         console.log(`[Dify] Client disconnected prematurely. Stopping translation for ${file.originalname}`);
         isClientDisconnected = true;
+        abortController.abort();
       });
 
       for (const xmlPath of xmlFiles) {
@@ -274,7 +279,8 @@ ${JSON.stringify(sanitizedTexts)}`;
                 finalApiKey, 
                 provider_id, 
                 providerConfig, 
-                finalModel
+                finalModel,
+                abortController.signal
               );
             }
 
