@@ -40,13 +40,17 @@
     "ollama": {
       "name": "Local Ollama",
       "models": [
-        { "id": "deepseek-r1:8b", "name": "DeepSeek R1 8B" },
-        { "id": "deepseek-r1:1.5b", "name": "DeepSeek R1 1.5B" },
-        { "id": "qwen3.5:35b", "name": "Qwen 3.5 35B" },
+        { "id": "deepseek-r1:8b", "name": "DeepSeek R1 8B (Default)" },
         { "id": "qwen3.5:9b", "name": "Qwen 3.5 9B" },
+        { "id": "qwen3.5:35b", "name": "Qwen 3.5 35B" },
+        { "id": "qwen3.5:4b", "name": "Qwen 3.5 4B" },
         { "id": "qwen3.5:0.8b", "name": "Qwen 3.5 0.8B" },
         { "id": "gemma4:26b", "name": "Gemma 4 26B" },
-        { "id": "deepseek-ocr:3b", "name": "DeepSeek OCR 3B" }
+        { "id": "gemma4:e4b", "name": "Gemma 4 e4B" },
+        { "id": "deepseek-r1:1.5b", "name": "DeepSeek R1 1.5B" },
+        { "id": "deepseek-ocr:3b", "name": "DeepSeek OCR 3B" },
+        { "id": "bge-large:335m", "name": "BGE Large 335M" },
+        { "id": "qwen3-embedding:0.6b", "name": "Qwen 3 Embedding 0.6B" }
       ],
       "defaultKey": "ollama",
       "baseURL": "http://localhost:11434/v1"
