@@ -102,6 +102,8 @@ ${JSON.stringify(sanitizedTexts)}`;
 
   // Dify-compatible Document Translation API (Optimized for Sync Response)
   app.post('/api/v1/translate-doc', upload.single('file'), async (req, res) => {
+    req.setTimeout(0); // Disable timeout for large files
+    res.setTimeout(0);
     try {
       const file = req.file;
       let { target_lang, provider_id, model_id, api_key } = req.body;
@@ -180,8 +182,12 @@ ${JSON.stringify(sanitizedTexts)}`;
         formatConfig.xmlPaths.some(regex => regex.test(name))
       );
 
-      // Process files with concurrency
+      // Process files with concurrency and dynamic batching
       const CONCURRENCY_LIMIT = 2; // Lower concurrency for stability on small models
+      const translationCache = new Map<string, string>();
+      let totalNodesTranslated = 0;
+      let totalNodesSkipped = 0;
+
       for (const xmlPath of xmlFiles) {
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
@@ -189,19 +195,65 @@ ${JSON.stringify(sanitizedTexts)}`;
         const doc = new DOMParser().parseFromString(content, 'application/xml');
         const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
         
-        // CRITICAL: Small batch size (10-15) for 1.5b models to prevent JSON errors
-        const BATCH_SIZE = 15; 
-        const batches = [];
-        for (let i = 0; i < tNodes.length; i += BATCH_SIZE) {
-          batches.push(tNodes.slice(i, i + BATCH_SIZE));
+        const nodesToTranslate: Element[] = [];
+        
+        tNodes.forEach(node => {
+          const text = (node.textContent || "").trim();
+          // Skip empty strings, pure numbers, or simple punctuation
+          if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(text)) {
+            if (translationCache.has(text)) {
+              node.textContent = translationCache.get(text)!;
+              totalNodesSkipped++;
+            } else {
+              nodesToTranslate.push(node);
+            }
+          } else {
+            totalNodesSkipped++; // No translation needed
+          }
+        });
+
+        if (nodesToTranslate.length === 0) {
+          const serializer = new XMLSerializer();
+          zip.file(xmlPath, serializer.serializeToString(doc));
+          continue;
         }
+
+        // Dynamic batching: limit by both item count and character count
+        const batches: Element[][] = [];
+        let currentBatch: Element[] = [];
+        let currentChars = 0;
+        const MAX_CHARS = 1000;
+        const MAX_ITEMS = 15;
+
+        for (const node of nodesToTranslate) {
+          const text = (node.textContent || "").trim();
+          if (currentBatch.length >= MAX_ITEMS || currentChars + text.length > MAX_CHARS) {
+            if (currentBatch.length > 0) {
+              batches.push(currentBatch);
+              currentBatch = [];
+              currentChars = 0;
+            }
+          }
+          currentBatch.push(node);
+          currentChars += text.length;
+        }
+        if (currentBatch.length > 0) batches.push(currentBatch);
+
+        console.log(`[Process] ${xmlPath}: ${batches.length} batches to translate. (Skipped ${totalNodesSkipped} cached/unneeded nodes)`);
 
         for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
           const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
           await Promise.all(currentChunks.map(async (batch) => {
-            const texts = batch.map(n => n.textContent || "").filter(t => t.trim().length > 0);
-            if (texts.length > 0) {
-              const translated = await internalTranslate(
+            const texts = batch.map(n => (n.textContent || "").trim());
+            
+            // Double check cache in case a concurrent batch translated it
+            const textsToFetch = texts.map(t => translationCache.has(t) ? translationCache.get(t)! : t);
+            const needsFetch = texts.some(t => !translationCache.has(t));
+
+            let translated: string[] = textsToFetch;
+
+            if (needsFetch) {
+              translated = await internalTranslate(
                 texts, 
                 target_lang || 'Chinese', 
                 finalApiKey, 
@@ -209,21 +261,28 @@ ${JSON.stringify(sanitizedTexts)}`;
                 providerConfig, 
                 finalModel
               );
-
-              let translatedIdx = 0;
-              batch.forEach((node) => {
-                const originalText = (node.textContent || "").trim();
-                if (originalText.length > 0 && translated[translatedIdx]) {
-                  node.textContent = translated[translatedIdx++];
-                }
-              });
             }
+
+            batch.forEach((node, idx) => {
+              const originalText = texts[idx];
+              const transText = translated[idx];
+              if (transText && transText !== originalText) {
+                node.textContent = transText;
+                translationCache.set(originalText, transText);
+              }
+              totalNodesTranslated++;
+            });
           }));
+          
+          if ((i + CONCURRENCY_LIMIT) % 4 === 0 || i + CONCURRENCY_LIMIT >= batches.length) {
+             console.log(`[Progress] ${xmlPath}: Translated ${Math.min(i + CONCURRENCY_LIMIT, batches.length)} / ${batches.length} batches...`);
+          }
         }
 
         const serializer = new XMLSerializer();
         zip.file(xmlPath, serializer.serializeToString(doc));
       }
+      console.log(`[Done] Translation complete. Translated: ${totalNodesTranslated}, Skipped/Cached: ${totalNodesSkipped}`);
 
       const outputBuffer = await zip.generateAsync({ 
         type: 'nodebuffer',
