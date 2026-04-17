@@ -54,6 +54,14 @@
       ],
       "defaultKey": "ollama",
       "baseURL": "http://172.19.0.1:11434/v1"
+    },
+    "openai-compatible": {
+      "name": "Local OpenAI Cluster",
+      "models": [
+        { "id": "Qwen_Qwen3.5-122B-A10B-Q4_K_S", "name": "Qwen 3.5 122B MoE (4-bit)" }
+      ],
+      "defaultKey": "none",
+      "baseURL": "http://10.1.100.86:8080/v1"
     }
   }
 }
