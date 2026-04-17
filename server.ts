@@ -21,21 +21,36 @@ async function startServer() {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-  // Helper for batch translation (internal use)
-  async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string, abortSignal?: AbortSignal) {
+  // Global Translation Cache (Persistent across requests for efficiency)
+const GLOBAL_TRANSLATION_CACHE = new Map<string, string>();
+const MAX_CACHE_SIZE = 5000;
+
+function addToGlobalCache(original: string, translated: string) {
+    if (GLOBAL_TRANSLATION_CACHE.size >= MAX_CACHE_SIZE) {
+        // Simple LRU: clear first entries if full
+        const firstKey = GLOBAL_TRANSLATION_CACHE.keys().next().value;
+        if (firstKey) GLOBAL_TRANSLATION_CACHE.delete(firstKey);
+    }
+    GLOBAL_TRANSLATION_CACHE.set(original, translated);
+}
+
+// Helper for batch translation (internal use)
+async function internalTranslate(texts: string[], targetLanguage: string, apiKey: string, providerId: string, providerConfig: any, model: string, abortSignal?: AbortSignal) {
     if (texts.length === 0) return [];
     
     // Sanitize inputs for small models: remove newlines/quotes that break JSON
     const sanitizedTexts = texts.map(t => t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim());
 
-    console.log(`[Translate] Using provider: ${providerId}, model: ${model}, baseURL: ${providerConfig?.baseURL}`);
+    const isLongText = texts.some(t => t.length > 300);
+    console.log(`[Translate] Using ${providerId}/${model}. longTextMode: ${isLongText}`);
 
     const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
 Requirements:
 1. Return ONLY a valid JSON array of strings.
-2. Maintain the exact same number of elements.
-3. Do not include any explanations, markdown formatting, or extra text.
-4. If a string is already in ${targetLanguage}, keep it as is.
+2. Maintain the exact same number of elements and order.
+3. Do not include any explanations, thoughts (<think>), markdown formatting, or extra text.
+4. Keep technical terms, emails, URLs, and numbers exactly as they are.
+5. Provide high-quality, natural-sounding translations.
 
 JSON to translate:
 ${JSON.stringify(sanitizedTexts)}`;
@@ -53,7 +68,10 @@ ${JSON.stringify(sanitizedTexts)}`;
           const responseStream = await ai.models.generateContentStream({
             model: model,
             contents: prompt,
-            config: { responseMimeType: 'application/json' }
+            config: { 
+                responseMimeType: 'application/json',
+                maxOutputTokens: 4096 
+            }
           });
           for await (const chunk of responseStream) {
               if (abortSignal?.aborted) throw new Error("AbortError: Translation aborted by client");
@@ -63,14 +81,15 @@ ${JSON.stringify(sanitizedTexts)}`;
           const openai = new OpenAI({ 
             apiKey: apiKey || 'dummy-key', 
             baseURL: providerConfig.baseURL || undefined,
-            timeout: 60000 // 60s timeout for Ollama
+            timeout: isLongText ? 120000 : 90000 // Up to 120s for huge clusters
           });
-          // Use stream: true to force Ollama to detect broken pipe immediately on client disconnect
+          
           const streamResponse = await openai.chat.completions.create({
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
             stream: true,
+            max_tokens: 4096
           }, { signal: abortSignal });
 
           for await (const chunk of streamResponse) {
@@ -80,43 +99,31 @@ ${JSON.stringify(sanitizedTexts)}`;
         }
 
         // Robust Parsing for DeepSeek/Ollama
-        console.log(`[Translate] Raw response (first 100 chars): ${resultText.substring(0, 100)}...`);
+        if (retries === 2) console.log(`[Translate] Done. response length: ${resultText.length}`);
         
-        // Remove <think> blocks
         resultText = resultText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        
-        // Extract JSON from markdown blocks if present
         const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) {
-          resultText = jsonMatch[1].trim();
-        }
+        if (jsonMatch) resultText = jsonMatch[1].trim();
 
         const startArr = resultText.indexOf('[');
         const endArr = resultText.lastIndexOf(']');
-        if (startArr !== -1 && endArr !== -1 && endArr > startArr) {
-          resultText = resultText.substring(startArr, endArr + 1);
-        }
+        if (startArr !== -1 && endArr !== -1) resultText = resultText.substring(startArr, endArr + 1);
         resultText = resultText.replace(/,\s*\]/g, ']'); 
 
         const translated = JSON.parse(resultText);
         if (Array.isArray(translated) && translated.length === sanitizedTexts.length) {
           return translated;
         }
-        console.error(`[Translate] Length mismatch or not an array. Expected ${sanitizedTexts.length}, got ${Array.isArray(translated) ? translated.length : 'not an array'}`);
         throw new Error("Length mismatch or invalid format");
       } catch (e: any) {
-        if (e.name === 'AbortError' || e.message?.includes('AbortError')) {
-           console.log(`[Translate] Early termination triggered. Throwing AbortError immediately.`);
-           throw e; // Break completely out of everything
-        }
-        console.warn(`[Translate] Attempt ${3-retries} failed for ${model}:`, e.message);
-        if (resultText) console.warn(`[Translate] Failed resultText snippet: ${resultText.substring(0, 200)}`);
+        if (e.name === 'AbortError' || e.message?.includes('AbortError')) throw e;
+        console.warn(`[Translate] Attempt ${3-retries} failed:`, e.message);
         retries--;
+        resultText = ""; // Clear for retry
       }
     }
-    console.error(`[Translate] All retries failed for batch. Returning original text.`);
     return texts;
-  }
+}
 
   // API route to get configuration
   app.get('/api/config', async (req, res) => {
@@ -241,14 +248,16 @@ ${JSON.stringify(sanitizedTexts)}`;
         abortController.abort();
       });
 
-    for (const xmlPath of xmlFiles) {
-        if (isClientDisconnected) break;
+      // Process XML files in PARALLEL for maximum performance
+      const XML_CONCURRENCY = 3;
+      const XML_BATCH_SIZE = Math.ceil(xmlFiles.length / XML_CONCURRENCY);
+      
+      const processXmlFile = async (xmlPath: string) => {
+        if (isClientDisconnected) return;
         const content = await zip.file(xmlPath)?.async('string');
-        if (!content) continue;
+        if (!content) return;
 
         const doc = new DOMParser().parseFromString(content, 'application/xml');
-        
-        // Find Paragraph Containers for Grouping
         const paragraphTag = (extension === '.docx') ? 'w:p' : (extension === '.pptx' ? 'a:p' : null);
         
         interface TextGroup {
@@ -258,19 +267,16 @@ ${JSON.stringify(sanitizedTexts)}`;
         const groupsToTranslate: TextGroup[] = [];
         
         if (paragraphTag) {
-          // Paragraph-level grouping for DOCX/PPTX to preserve context and handle split runs
           const paragraphs = Array.from(doc.getElementsByTagName(paragraphTag));
           paragraphs.forEach(p => {
             const tNodes = Array.from(p.getElementsByTagName(formatConfig.textTag));
             if (tNodes.length === 0) return;
-
             const mergedText = tNodes.map(n => n.textContent || "").join("");
             const trimmedText = mergedText.trim();
 
             if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(trimmedText)) {
-              if (translationCache.has(mergedText)) {
-                // Apply cached translation to the full paragraph
-                const cached = translationCache.get(mergedText)!;
+              const cached = GLOBAL_TRANSLATION_CACHE.get(mergedText);
+              if (cached) {
                 tNodes[0].textContent = cached;
                 for (let j = 1; j < tNodes.length; j++) tNodes[j].textContent = "";
                 totalNodesSkipped += tNodes.length;
@@ -282,13 +288,13 @@ ${JSON.stringify(sanitizedTexts)}`;
             }
           });
         } else {
-          // XLSX or fallback: Treat every node as independent
           const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
           tNodes.forEach(node => {
             const text = (node.textContent || "").trim();
             if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(text)) {
-              if (translationCache.has(text)) {
-                node.textContent = translationCache.get(text)!;
+              const cached = GLOBAL_TRANSLATION_CACHE.get(text);
+              if (cached) {
+                node.textContent = cached;
                 totalNodesSkipped++;
               } else {
                 groupsToTranslate.push({ originalNodes: [node], mergedText: text });
@@ -299,20 +305,16 @@ ${JSON.stringify(sanitizedTexts)}`;
           });
         }
 
-        console.log(`[Dify] XML file ${xmlPath}: Found ${groupsToTranslate.length} groups to translate.`);
-
         if (groupsToTranslate.length === 0) {
-          const serializer = new XMLSerializer();
-          zip.file(xmlPath, serializer.serializeToString(doc));
-          continue;
+          zip.file(xmlPath, new XMLSerializer().serializeToString(doc));
+          return;
         }
 
-        // Dynamic batching: limit by both group count and character count
         const batches: TextGroup[][] = [];
         let currentBatch: TextGroup[] = [];
         let currentChars = 0;
-        const MAX_CHARS = 4000; // Increased limit slightly for merged paragraphs
-        const MAX_ITEMS = 25;
+        const MAX_CHARS = 1200; 
+        const MAX_ITEMS = 10;
 
         for (const group of groupsToTranslate) {
           if (currentBatch.length >= MAX_ITEMS || currentChars + group.mergedText.length > MAX_CHARS) {
@@ -327,53 +329,42 @@ ${JSON.stringify(sanitizedTexts)}`;
         }
         if (currentBatch.length > 0) batches.push(currentBatch);
 
-        console.log(`[Process] ${xmlPath}: ${batches.length} batches to translate.`);
-
+        // Batch processing with internal concurrency
         for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
           if (isClientDisconnected) break;
           const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
           await Promise.all(currentChunks.map(async (batch) => {
-            const texts = batch.map(g => g.mergedText);
-            
-            let translated: string[] = [];
             try {
-              translated = await internalTranslate(
-                texts, 
+              const translated = await internalTranslate(
+                batch.map(g => g.mergedText), 
                 target_lang || 'Chinese', 
-                finalApiKey, 
-                provider_id, 
-                providerConfig, 
-                finalModel,
+                finalApiKey, provider_id, providerConfig, finalModel,
                 abortController.signal
               );
+              batch.forEach((group, idx) => {
+                const trans = translated[idx];
+                if (trans && trans !== group.mergedText) {
+                  group.originalNodes[0].textContent = trans;
+                  for (let k = 1; k < group.originalNodes.length; k++) group.originalNodes[k].textContent = "";
+                  addToGlobalCache(group.mergedText, trans);
+                }
+                totalNodesTranslated += group.originalNodes.length;
+              });
             } catch (err: any) {
               if (err.name === 'AbortError' || err.message?.includes('AbortError')) throw err;
-              console.warn(`[Process] Batch failed, using original text.`);
-              translated = texts;
+              console.warn(`[Batch] Error processing batch in ${xmlPath}`);
             }
-
-            batch.forEach((group, idx) => {
-              const original = group.mergedText;
-              const trans = translated[idx];
-              if (trans && trans !== original) {
-                // In paragraph mode, we put the full translation into the first node and clear the others
-                group.originalNodes[0].textContent = trans;
-                for (let k = 1; k < group.originalNodes.length; k++) {
-                  group.originalNodes[k].textContent = "";
-                }
-                translationCache.set(original, trans);
-              }
-              totalNodesTranslated += group.originalNodes.length;
-            });
           }));
-          
-          if ((i + CONCURRENCY_LIMIT) % 4 === 0 || i + CONCURRENCY_LIMIT >= batches.length) {
-             console.log(`[Progress] ${xmlPath}: Processed ${Math.min(i + CONCURRENCY_LIMIT, batches.length)} / ${batches.length} batches...`);
-          }
         }
+        zip.file(xmlPath, new XMLSerializer().serializeToString(doc));
+      };
 
-        const serializer = new XMLSerializer();
-        zip.file(xmlPath, serializer.serializeToString(doc));
+      // Run parallel XML processing in groups
+      for (let i = 0; i < xmlFiles.length; i += XML_CONCURRENCY) {
+          if (isClientDisconnected) break;
+          const slice = xmlFiles.slice(i, i + XML_CONCURRENCY);
+          console.log(`[Dify] Parallel processing XML files: ${slice.join(', ')}`);
+          await Promise.all(slice.map(path => processXmlFile(path)));
       }
       if (isClientDisconnected) {
         return; // Response is already closed, just exit the function
