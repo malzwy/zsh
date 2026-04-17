@@ -213,7 +213,9 @@ ${JSON.stringify(sanitizedTexts)}`;
             /ppt\/notesSlides\/notesSlide\d+\.xml/,
             /ppt\/slides\/_rels\/slide\d+\.xml\.rels/,
             /ppt\/theme\/theme\d+\.xml/,
-            /ppt\/diagrams\/.+\.xml/
+            /ppt\/diagrams\/.+\.xml/,
+            /ppt\/slideMasters\/slideMaster\d+\.xml/,
+            /ppt\/slideLayouts\/slideLayout\d+\.xml/
           ], 
           textTag: 'a:t' 
         };
@@ -239,75 +241,102 @@ ${JSON.stringify(sanitizedTexts)}`;
         abortController.abort();
       });
 
-      for (const xmlPath of xmlFiles) {
+    for (const xmlPath of xmlFiles) {
         if (isClientDisconnected) break;
         const content = await zip.file(xmlPath)?.async('string');
         if (!content) continue;
 
         const doc = new DOMParser().parseFromString(content, 'application/xml');
-        const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
         
-        const nodesToTranslate: Element[] = [];
+        // Find Paragraph Containers for Grouping
+        const paragraphTag = (extension === '.docx') ? 'w:p' : (extension === '.pptx' ? 'a:p' : null);
         
-        tNodes.forEach(node => {
-          const text = (node.textContent || "").trim();
-          // Skip empty strings, pure numbers, or simple punctuation
-          if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(text)) {
-            if (translationCache.has(text)) {
-              node.textContent = translationCache.get(text)!;
-              totalNodesSkipped++;
+        interface TextGroup {
+          originalNodes: Element[];
+          mergedText: string;
+        }
+        const groupsToTranslate: TextGroup[] = [];
+        
+        if (paragraphTag) {
+          // Paragraph-level grouping for DOCX/PPTX to preserve context and handle split runs
+          const paragraphs = Array.from(doc.getElementsByTagName(paragraphTag));
+          paragraphs.forEach(p => {
+            const tNodes = Array.from(p.getElementsByTagName(formatConfig.textTag));
+            if (tNodes.length === 0) return;
+
+            const mergedText = tNodes.map(n => n.textContent || "").join("");
+            const trimmedText = mergedText.trim();
+
+            if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(trimmedText)) {
+              if (translationCache.has(mergedText)) {
+                // Apply cached translation to the full paragraph
+                const cached = translationCache.get(mergedText)!;
+                tNodes[0].textContent = cached;
+                for (let j = 1; j < tNodes.length; j++) tNodes[j].textContent = "";
+                totalNodesSkipped += tNodes.length;
+              } else {
+                groupsToTranslate.push({ originalNodes: tNodes, mergedText: mergedText });
+              }
             } else {
-              nodesToTranslate.push(node);
+              totalNodesSkipped += tNodes.length;
             }
-          } else {
-            totalNodesSkipped++; // No translation needed
-          }
-        });
-        console.log(`[Dify] XML file ${xmlPath}: Found ${tNodes.length} text nodes, ${nodesToTranslate.length} nodes to translate.`);
+          });
+        } else {
+          // XLSX or fallback: Treat every node as independent
+          const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
+          tNodes.forEach(node => {
+            const text = (node.textContent || "").trim();
+            if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(text)) {
+              if (translationCache.has(text)) {
+                node.textContent = translationCache.get(text)!;
+                totalNodesSkipped++;
+              } else {
+                groupsToTranslate.push({ originalNodes: [node], mergedText: text });
+              }
+            } else {
+              totalNodesSkipped++;
+            }
+          });
+        }
 
+        console.log(`[Dify] XML file ${xmlPath}: Found ${groupsToTranslate.length} groups to translate.`);
 
-        if (nodesToTranslate.length === 0) {
+        if (groupsToTranslate.length === 0) {
           const serializer = new XMLSerializer();
           zip.file(xmlPath, serializer.serializeToString(doc));
           continue;
         }
 
-        // Dynamic batching: limit by both item count and character count
-        const batches: Element[][] = [];
-        let currentBatch: Element[] = [];
+        // Dynamic batching: limit by both group count and character count
+        const batches: TextGroup[][] = [];
+        let currentBatch: TextGroup[] = [];
         let currentChars = 0;
-        const MAX_CHARS = 2000;
-        const MAX_ITEMS = 30;
+        const MAX_CHARS = 4000; // Increased limit slightly for merged paragraphs
+        const MAX_ITEMS = 25;
 
-        for (const node of nodesToTranslate) {
-          const text = (node.textContent || "").trim();
-          if (currentBatch.length >= MAX_ITEMS || currentChars + text.length > MAX_CHARS) {
+        for (const group of groupsToTranslate) {
+          if (currentBatch.length >= MAX_ITEMS || currentChars + group.mergedText.length > MAX_CHARS) {
             if (currentBatch.length > 0) {
               batches.push(currentBatch);
               currentBatch = [];
               currentChars = 0;
             }
           }
-          currentBatch.push(node);
-          currentChars += text.length;
+          currentBatch.push(group);
+          currentChars += group.mergedText.length;
         }
         if (currentBatch.length > 0) batches.push(currentBatch);
 
-        console.log(`[Process] ${xmlPath}: ${batches.length} batches to translate. (Skipped ${totalNodesSkipped} cached/unneeded nodes)`);
+        console.log(`[Process] ${xmlPath}: ${batches.length} batches to translate.`);
 
         for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
           if (isClientDisconnected) break;
           const currentChunks = batches.slice(i, i + CONCURRENCY_LIMIT);
           await Promise.all(currentChunks.map(async (batch) => {
-            const texts = batch.map(n => (n.textContent || "").trim());
+            const texts = batch.map(g => g.mergedText);
             
-            // Double check cache in case a concurrent batch translated it
-            const textsToFetch = texts.map(t => translationCache.has(t) ? translationCache.get(t)! : t);
-            const needsFetch = texts.some(t => !translationCache.has(t));
-
-            let translated: string[] = textsToFetch;
-
-            if (needsFetch) {
+            let translated: string[] = [];
+            try {
               translated = await internalTranslate(
                 texts, 
                 target_lang || 'Chinese', 
@@ -317,21 +346,29 @@ ${JSON.stringify(sanitizedTexts)}`;
                 finalModel,
                 abortController.signal
               );
+            } catch (err: any) {
+              if (err.name === 'AbortError' || err.message?.includes('AbortError')) throw err;
+              console.warn(`[Process] Batch failed, using original text.`);
+              translated = texts;
             }
 
-            batch.forEach((node, idx) => {
-              const originalText = texts[idx];
-              const transText = translated[idx];
-              if (transText && transText !== originalText) {
-                node.textContent = transText;
-                translationCache.set(originalText, transText);
+            batch.forEach((group, idx) => {
+              const original = group.mergedText;
+              const trans = translated[idx];
+              if (trans && trans !== original) {
+                // In paragraph mode, we put the full translation into the first node and clear the others
+                group.originalNodes[0].textContent = trans;
+                for (let k = 1; k < group.originalNodes.length; k++) {
+                  group.originalNodes[k].textContent = "";
+                }
+                translationCache.set(original, trans);
               }
-              totalNodesTranslated++;
+              totalNodesTranslated += group.originalNodes.length;
             });
           }));
           
           if ((i + CONCURRENCY_LIMIT) % 4 === 0 || i + CONCURRENCY_LIMIT >= batches.length) {
-             console.log(`[Progress] ${xmlPath}: Translated ${Math.min(i + CONCURRENCY_LIMIT, batches.length)} / ${batches.length} batches...`);
+             console.log(`[Progress] ${xmlPath}: Processed ${Math.min(i + CONCURRENCY_LIMIT, batches.length)} / ${batches.length} batches...`);
           }
         }
 
