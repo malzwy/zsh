@@ -201,15 +201,18 @@ ${JSON.stringify(sanitizedTexts)}`;
             /word\/header\d+\.xml/,
             /word\/footer\d+\.xml/,
             /word\/footnotes\.xml/,
-            /word\/endnotes\.xml/
+            /word\/endnotes\.xml/,
+            /word\/charts\/chart\d+\.xml/,
+            /word\/diagrams\/data\d+\.xml/
           ], 
-          textTag: 'w:t' 
+          textTag: 'w:t' // Fallback for standard docx elements. Note that charts use a:t or c:v but we focus on standard w:t/a:t first.
         };
       } else if (extension === '.xlsx') {
         formatConfig = { 
           xmlPaths: [
             /xl\/worksheets\/sheet\d+\.xml/,
-            /xl\/sharedStrings\.xml/
+            /xl\/sharedStrings\.xml/,
+            /xl\/charts\/chart\d+\.xml/
           ], 
           textTag: 't' 
         };
@@ -220,9 +223,12 @@ ${JSON.stringify(sanitizedTexts)}`;
             /ppt\/notesSlides\/notesSlide\d+\.xml/,
             /ppt\/slides\/_rels\/slide\d+\.xml\.rels/,
             /ppt\/theme\/theme\d+\.xml/,
-            /ppt\/diagrams\/.+\.xml/,
+            /ppt\/diagrams\/data\d+\.xml/,
+            /ppt\/charts\/chart\d+\.xml/,
             /ppt\/slideMasters\/slideMaster\d+\.xml/,
-            /ppt\/slideLayouts\/slideLayout\d+\.xml/
+            /ppt\/slideLayouts\/slideLayout\d+\.xml/,
+            /ppt\/handoutMasters\/handoutMaster\d+\.xml/,
+            /ppt\/notesMasters\/notesMaster\d+\.xml/
           ], 
           textTag: 'a:t' 
         };
@@ -268,13 +274,20 @@ ${JSON.stringify(sanitizedTexts)}`;
         
         if (paragraphTag) {
           const paragraphs = Array.from(doc.getElementsByTagName(paragraphTag));
+          
+          // Also fetch isolated drawing/text elements not wrapped in standard paragraphs (common in charts/SmartArt)
+          const isolatedNodes = Array.from(doc.getElementsByTagName('a:t')).filter(
+            n => !n.closest || !n.closest(paragraphTag) // For standard DOM parsers that support closest
+          );
+          
           paragraphs.forEach(p => {
             const tNodes = Array.from(p.getElementsByTagName(formatConfig.textTag));
             if (tNodes.length === 0) return;
             const mergedText = tNodes.map(n => n.textContent || "").join("");
             const trimmedText = mergedText.trim();
-
-            if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(trimmedText)) {
+            // Loosened the regex to allow translation of purely English numerics mixed with text 
+            // e.g., "1. New Training" might have been skipped if parsed weirdly.
+            if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(trimmedText) && !/^[\d\s.,?!]+$/.test(trimmedText)) {
               const cached = GLOBAL_TRANSLATION_CACHE.get(mergedText);
               if (cached) {
                 tNodes[0].textContent = cached;
@@ -287,11 +300,35 @@ ${JSON.stringify(sanitizedTexts)}`;
               totalNodesSkipped += tNodes.length;
             }
           });
+          
+          // Process isolated text nodes that might belong to diagrams/charts mapped as a:t
+          isolatedNodes.forEach(node => {
+            const text = (node.textContent || "").trim();
+            if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(text) && !/^[\d\s.,?!]+$/.test(text)) {
+              const cached = GLOBAL_TRANSLATION_CACHE.get(text);
+              if (cached) {
+                node.textContent = cached;
+                totalNodesSkipped++;
+              } else {
+                groupsToTranslate.push({ originalNodes: [node], mergedText: text });
+              }
+            } else {
+              totalNodesSkipped++;
+            }
+          });
         } else {
           const tNodes = Array.from(doc.getElementsByTagName(formatConfig.textTag));
+          
+          // Enhanced: Also scrape for 'a:t' in docx/xlsx because DrawingML/Charts often use 'a:t' universally for text elements.
+          if (formatConfig.textTag !== 'a:t') {
+             const drawingNodes = Array.from(doc.getElementsByTagName('a:t'));
+             tNodes.push(...drawingNodes);
+          }
+
           tNodes.forEach(node => {
             const text = (node.textContent || "").trim();
-            if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5]/.test(text)) {
+            // Loosened regex identically for fallback nodes
+            if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(text) && !/^[\d\s.,?!]+$/.test(text)) {
               const cached = GLOBAL_TRANSLATION_CACHE.get(text);
               if (cached) {
                 node.textContent = cached;
