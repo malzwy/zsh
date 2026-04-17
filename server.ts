@@ -110,11 +110,33 @@ ${JSON.stringify(sanitizedTexts)}`;
         if (startArr !== -1 && endArr !== -1) resultText = resultText.substring(startArr, endArr + 1);
         resultText = resultText.replace(/,\s*\]/g, ']'); 
 
-        const translated = JSON.parse(resultText);
-        if (Array.isArray(translated) && translated.length === sanitizedTexts.length) {
-          return translated;
+        let translated;
+        try {
+          translated = JSON.parse(resultText);
+        } catch (jsonErr) {
+           // Fallback for slightly malformed JSON strings from LLMs
+           console.warn(`[Translate] JSON parse error, attempting to sanitize: ${jsonErr}`);
+           resultText = resultText.replace(/\\+"/g, '\\"').replace(/\\'+/g, "'"); 
+           try { translated = JSON.parse(resultText); } catch(e) { throw new Error("Unrecoverable JSON format"); }
         }
-        throw new Error("Length mismatch or invalid format");
+
+        if (Array.isArray(translated)) {
+          if (translated.length === sanitizedTexts.length) {
+            return translated;
+          } else if (translated.length > sanitizedTexts.length) {
+             console.warn(`[Translate] Model returned more items than requested (${translated.length} > ${sanitizedTexts.length}). Truncating.`);
+             return translated.slice(0, sanitizedTexts.length);
+          } else {
+             console.warn(`[Translate] Model returned fewer items than requested (${translated.length} < ${sanitizedTexts.length}). Padding with original.`);
+             // Pad the missing items with the original text
+             const padded = [...translated];
+             for(let i=translated.length; i<sanitizedTexts.length; i++) {
+                padded.push(texts[i]);
+             }
+             return padded;
+          }
+        }
+        throw new Error("Result is not an array");
       } catch (e: any) {
         if (e.name === 'AbortError' || e.message?.includes('AbortError')) throw e;
         console.warn(`[Translate] Attempt ${3-retries} failed:`, e.message);
@@ -276,7 +298,12 @@ ${JSON.stringify(sanitizedTexts)}`;
           const paragraphs = Array.from(doc.getElementsByTagName(paragraphTag));
           
           // Also fetch isolated drawing/text elements not wrapped in standard paragraphs (common in charts/SmartArt)
-          const isolatedNodes = Array.from(doc.getElementsByTagName('a:t')).filter(
+          // Also look for fallback 't' tags which Excel/some SmartArts might use interchangeably
+          const isolatedNodes = Array.from(doc.getElementsByTagName('a:t'));
+          if (formatConfig.textTag !== 'a:t') {
+             isolatedNodes.push(...Array.from(doc.getElementsByTagName(formatConfig.textTag)));
+          }
+          const filteredIsolatedNodes = isolatedNodes.filter(
             n => !n.closest || !n.closest(paragraphTag) // For standard DOM parsers that support closest
           );
           
@@ -302,7 +329,7 @@ ${JSON.stringify(sanitizedTexts)}`;
           });
           
           // Process isolated text nodes that might belong to diagrams/charts mapped as a:t
-          isolatedNodes.forEach(node => {
+          filteredIsolatedNodes.forEach(node => {
             const text = (node.textContent || "").trim();
             if (text.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(text) && !/^[\d\s.,?!]+$/.test(text)) {
               const cached = GLOBAL_TRANSLATION_CACHE.get(text);
