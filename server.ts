@@ -45,29 +45,38 @@ ${JSON.stringify(sanitizedTexts)}`;
     
     while (retries >= 0) {
       if (abortSignal?.aborted) {
-         throw new Error("Translation aborted by client");
+         throw new Error("AbortError: Translation aborted by client");
       }
       try {
         if (providerId === 'gemini') {
           const ai = new GoogleGenAI({ apiKey: apiKey });
-          const response = await ai.models.generateContent({
+          const responseStream = await ai.models.generateContentStream({
             model: model,
             contents: prompt,
             config: { responseMimeType: 'application/json' }
           });
-          resultText = response.text?.trim() || "[]";
+          for await (const chunk of responseStream) {
+              if (abortSignal?.aborted) throw new Error("AbortError: Translation aborted by client");
+              resultText += chunk.text || "";
+          }
         } else {
           const openai = new OpenAI({ 
             apiKey: apiKey || 'dummy-key', 
             baseURL: providerConfig.baseURL || undefined,
             timeout: 60000 // 60s timeout for Ollama
           });
-          const response = await openai.chat.completions.create({
+          // Use stream: true to force Ollama to detect broken pipe immediately on client disconnect
+          const streamResponse = await openai.chat.completions.create({
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
+            stream: true,
           }, { signal: abortSignal });
-          resultText = response.choices[0]?.message?.content?.trim() || "[]";
+
+          for await (const chunk of streamResponse) {
+              if (abortSignal?.aborted) throw new Error("AbortError: Translation aborted by client");
+              resultText += chunk.choices[0]?.delta?.content || "";
+          }
         }
 
         // Robust Parsing for DeepSeek/Ollama
@@ -95,7 +104,11 @@ ${JSON.stringify(sanitizedTexts)}`;
         }
         console.error(`[Translate] Length mismatch or not an array. Expected ${sanitizedTexts.length}, got ${Array.isArray(translated) ? translated.length : 'not an array'}`);
         throw new Error("Length mismatch or invalid format");
-      } catch (e) {
+      } catch (e: any) {
+        if (e.name === 'AbortError' || e.message?.includes('AbortError')) {
+           console.log(`[Translate] Early termination triggered. Throwing AbortError immediately.`);
+           throw e; // Break completely out of everything
+        }
         console.warn(`[Translate] Attempt ${3-retries} failed for ${model}:`, e.message);
         if (resultText) console.warn(`[Translate] Failed resultText snippet: ${resultText.substring(0, 200)}`);
         retries--;
