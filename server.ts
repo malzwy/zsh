@@ -39,21 +39,22 @@ async function internalTranslate(texts: string[], targetLanguage: string, apiKey
     if (texts.length === 0) return [];
     
     // Sanitize inputs for small models: remove newlines/quotes that break JSON
-    const sanitizedTexts = texts.map(t => t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim());
+    const payload: Record<string, string> = {};
+    texts.forEach((t, i) => { payload[`t${i}`] = t.replace(/[\r\n\t]/g, ' ').replace(/"/g, "'").trim(); });
 
     const isLongText = texts.some(t => t.length > 300);
     console.log(`[Translate] Using ${providerId}/${model}. longTextMode: ${isLongText}`);
 
-    const prompt = `Translate the following JSON array of strings to ${targetLanguage}. 
+    const prompt = `Translate the following JSON object's values to ${targetLanguage}. 
 Requirements:
-1. Return ONLY a valid JSON array of strings.
-2. Maintain the exact same number of elements and order.
+1. Return ONLY a valid JSON object.
+2. Maintain the EXACT same keys (t0, t1, etc.).
 3. Do not include any explanations, thoughts (<think>), markdown formatting, or extra text.
 4. Keep technical terms, emails, URLs, and numbers exactly as they are.
 5. Provide high-quality, natural-sounding translations.
 
 JSON to translate:
-${JSON.stringify(sanitizedTexts)}`;
+${JSON.stringify(payload)}`;
 
     let resultText = "";
     let retries = 2;
@@ -105,38 +106,28 @@ ${JSON.stringify(sanitizedTexts)}`;
         const jsonMatch = resultText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
         if (jsonMatch) resultText = jsonMatch[1].trim();
 
-        const startArr = resultText.indexOf('[');
-        const endArr = resultText.lastIndexOf(']');
+        const startArr = resultText.indexOf('{');
+        const endArr = resultText.lastIndexOf('}');
         if (startArr !== -1 && endArr !== -1) resultText = resultText.substring(startArr, endArr + 1);
-        resultText = resultText.replace(/,\s*\]/g, ']'); 
 
-        let translated;
+        let translatedObj: any;
         try {
-          translated = JSON.parse(resultText);
+          translatedObj = JSON.parse(resultText);
         } catch (jsonErr) {
            // Fallback for slightly malformed JSON strings from LLMs
            console.warn(`[Translate] JSON parse error, attempting to sanitize: ${jsonErr}`);
            resultText = resultText.replace(/\\+"/g, '\\"').replace(/\\'+/g, "'"); 
-           try { translated = JSON.parse(resultText); } catch(e) { throw new Error("Unrecoverable JSON format"); }
+           try { translatedObj = JSON.parse(resultText); } catch(e) { throw new Error("Unrecoverable JSON format"); }
         }
 
-        if (Array.isArray(translated)) {
-          if (translated.length === sanitizedTexts.length) {
-            return translated;
-          } else if (translated.length > sanitizedTexts.length) {
-             console.warn(`[Translate] Model returned more items than requested (${translated.length} > ${sanitizedTexts.length}). Truncating.`);
-             return translated.slice(0, sanitizedTexts.length);
-          } else {
-             console.warn(`[Translate] Model returned fewer items than requested (${translated.length} < ${sanitizedTexts.length}). Padding with original.`);
-             // Pad the missing items with the original text
-             const padded = [...translated];
-             for(let i=translated.length; i<sanitizedTexts.length; i++) {
-                padded.push(texts[i]);
-             }
-             return padded;
-          }
+        if (typeof translatedObj === 'object' && !Array.isArray(translatedObj)) {
+            const resultArr: string[] = [];
+            for (let i = 0; i < texts.length; i++) {
+                resultArr.push(translatedObj[`t${i}`] || texts[i]); // Guarantee identical length, fallback to original if missing
+            }
+            return resultArr;
         }
-        throw new Error("Result is not an array");
+        throw new Error("Result is not a JSON Object");
       } catch (e: any) {
         if (e.name === 'AbortError' || e.message?.includes('AbortError')) throw e;
         console.warn(`[Translate] Attempt ${3-retries} failed:`, e.message);
@@ -308,24 +299,43 @@ ${JSON.stringify(sanitizedTexts)}`;
           );
           
           paragraphs.forEach(p => {
-            const tNodes = Array.from(p.getElementsByTagName(formatConfig.textTag));
-            if (tNodes.length === 0) return;
-            const mergedText = tNodes.map(n => n.textContent || "").join("");
-            const trimmedText = mergedText.trim();
-            // Loosened the regex to allow translation of purely English numerics mixed with text 
-            // e.g., "1. New Training" might have been skipped if parsed weirdly.
-            if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(trimmedText) && !/^[\d\s.,?!]+$/.test(trimmedText)) {
-              const cached = GLOBAL_TRANSLATION_CACHE.get(mergedText);
-              if (cached) {
-                tNodes[0].textContent = cached;
-                for (let j = 1; j < tNodes.length; j++) tNodes[j].textContent = "";
-                totalNodesSkipped += tNodes.length;
-              } else {
-                groupsToTranslate.push({ originalNodes: tNodes, mergedText: mergedText });
+            const localGroups: TextGroup[] = [];
+            let currentNodes: Element[] = [];
+
+            // Traverse the paragraph and break merge groups at line breaks (a:br / w:br)
+            const traverse = (node: Node) => {
+              if (node.nodeName === 'a:br' || node.nodeName === 'w:br') {
+                 if (currentNodes.length > 0) {
+                    localGroups.push({ originalNodes: currentNodes, mergedText: currentNodes.map(n => n.textContent || "").join("") });
+                    currentNodes = [];
+                 }
+              } else if (node.nodeName === formatConfig.textTag) {
+                 currentNodes.push(node as Element);
+              } else if (node.childNodes) {
+                 for (let i = 0; i < node.childNodes.length; i++) traverse(node.childNodes[i]);
               }
-            } else {
-              totalNodesSkipped += tNodes.length;
+            };
+
+            traverse(p);
+            if (currentNodes.length > 0) {
+              localGroups.push({ originalNodes: currentNodes, mergedText: currentNodes.map(n => n.textContent || "").join("") });
             }
+
+            localGroups.forEach(lg => {
+              const trimmedText = lg.mergedText.trim();
+              if (trimmedText.length > 0 && /[a-zA-Z\u4e00-\u9fa5\d]/.test(trimmedText) && !/^[\d\s.,?!]+$/.test(trimmedText)) {
+                const cached = GLOBAL_TRANSLATION_CACHE.get(lg.mergedText);
+                if (cached) {
+                  lg.originalNodes[0].textContent = cached;
+                  for (let j = 1; j < lg.originalNodes.length; j++) lg.originalNodes[j].textContent = "";
+                  totalNodesSkipped += lg.originalNodes.length;
+                } else {
+                  groupsToTranslate.push(lg);
+                }
+              } else {
+                totalNodesSkipped += lg.originalNodes.length;
+              }
+            });
           });
           
           // Process isolated text nodes that might belong to diagrams/charts mapped as a:t
