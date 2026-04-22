@@ -164,6 +164,12 @@ ${JSON.stringify(payload)}`;
       const file = req.file;
       let { target_lang, provider_id, model_id, api_key } = req.body;
 
+      // Sanitize targetLanguage from Dify LLM extraction (remove quotes, newlines, trim spaces)
+      if (target_lang && typeof target_lang === 'string') {
+          target_lang = target_lang.replace(/['"\r\n]/g, '').trim();
+      }
+      const finalTargetLang = target_lang || 'Chinese';
+
       // Debug logging for incoming request
       console.log(`[Dify Request] Headers:`, JSON.stringify(req.headers));
       console.log(`[Dify Request] Body:`, JSON.stringify({ ...req.body, api_key: req.body.api_key ? '***' : undefined }));
@@ -196,7 +202,7 @@ ${JSON.stringify(payload)}`;
       const finalApiKey = api_key || providerConfig.defaultKey;
       const finalModel = model_id || providerConfig.models[0].id;
 
-      console.log(`[Dify] Translating ${file.originalname} to ${target_lang || 'Chinese'} using ${provider_id}/${finalModel}`);
+      console.log(`[Dify] Translating ${file.originalname} to ${finalTargetLang} using ${provider_id}/${finalModel}`);
 
       const zip = await JSZip.loadAsync(file.buffer);
       const extension = path.extname(file.originalname).toLowerCase();
@@ -411,7 +417,7 @@ ${JSON.stringify(payload)}`;
             try {
               const translated = await internalTranslate(
                 batch.map(g => g.mergedText), 
-                target_lang || 'Chinese', 
+                finalTargetLang, 
                 finalApiKey, provider_id, providerConfig, finalModel,
                 abortController.signal
               );
